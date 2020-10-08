@@ -11,7 +11,7 @@ func main() {
 	addr := "localhost:3372"
 	c, err := graphtrace.NewTcpClient(addr)
 	maybeFail(err, "%s: could not connect, %s", addr, err)
-	c.Message([]byte("hello world"))
+	c.Trace([]byte("hello world"))
 }
 
 func maybeFail(err error, errfmt string, params ...interface{}) {

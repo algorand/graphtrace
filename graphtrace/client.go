@@ -3,6 +3,7 @@ package graphtrace
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"log"
 	"net"
 	"sync/atomic"
@@ -14,7 +15,7 @@ type tcpOrUdp interface {
 }
 
 type Client interface {
-	Message(m []byte)
+	Trace(m []byte)
 	Ping(previousMessageSenderTime uint64)
 }
 
@@ -79,7 +80,7 @@ const (
 	MaxRecordLength  = 1 + binary.MaxVarintLen64 + binary.MaxVarintLen64 + MaxMessageLength
 )
 
-func (c *client) Message(m []byte) {
+func (c *client) Trace(m []byte) {
 	if c == nil {
 		return
 	}
@@ -87,18 +88,7 @@ func (c *client) Message(m []byte) {
 		// TODO: try to reconnect?
 		return
 	}
-	dt := time.Now().Sub(Epoch).Microseconds()
-	if dt < 0 {
-		panic("negative time since epoch")
-	}
-	msg := make([]byte, 1+binary.MaxVarintLen64+binary.MaxVarintLen64+len(m))
-	msg[0] = MessageTrace
-	pos := 1
-	pos += binary.PutUvarint(msg[pos:], uint64(dt))
-	pos += binary.PutUvarint(msg[pos:], uint64(len(m)))
-	copy(msg[pos:], m)
-	pos += len(m)
-	msg = msg[:pos]
+	msg := BuildTrace(EpochMicroseconds(), m)
 	_, err := c.conn.Write(msg)
 	if err != nil {
 		// TODO: log error
@@ -114,7 +104,71 @@ func EpochMicroseconds() uint64 {
 	return uint64(dt)
 }
 
-func (c *client) Ping(previousMessageSenderTime uint64) {
+func BuildPing(now, otherTime uint64) []byte {
+	msg := make([]byte, 1+binary.MaxVarintLen64+binary.MaxVarintLen64)
+	msg[0] = MessagePing
+	pos := 1
+	pos += binary.PutUvarint(msg[pos:], now)
+	pos += binary.PutUvarint(msg[pos:], otherTime)
+	return msg[:pos]
+}
+
+var (
+	ErrBadPingTheirTime  = errors.New("bad ping record in their time")
+	ErrBadPingMyTime     = errors.New("bad ping record in my time")
+	ErrBadTraceTheirTime = errors.New("bad trace record in their time")
+	ErrBadTraceLength    = errors.New("bad trace record in length")
+)
+
+func ParsePing(rb []byte) (theirTime, myTime uint64, err error) {
+	pos := 1
+	var blen int
+	theirTime, blen = binary.Uvarint(rb[pos:])
+	if blen <= 0 {
+		err = ErrBadPingTheirTime
+		return
+	}
+	pos += blen
+	myTime, blen = binary.Uvarint(rb[pos:])
+	if blen <= 0 {
+		err = ErrBadPingMyTime
+		return
+	}
+	return
+}
+
+func BuildTrace(now uint64, m []byte) []byte {
+	msg := make([]byte, 1+binary.MaxVarintLen64+binary.MaxVarintLen64+len(m))
+	msg[0] = MessageTrace
+	pos := 1
+	pos += binary.PutUvarint(msg[pos:], now)
+	pos += binary.PutUvarint(msg[pos:], uint64(len(m)))
+	copy(msg[pos:], m)
+	pos += len(m)
+	return msg[:pos]
+}
+
+func ParseTrace(rb []byte) (theirTime uint64, m []byte, err error) {
+	pos := 1
+	var blen int
+	theirTime, blen = binary.Uvarint(rb[pos:])
+	if blen <= 0 {
+		err = ErrBadTraceTheirTime
+		return
+	}
+	pos += blen
+	var mlen uint64
+	mlen, blen = binary.Uvarint(rb[pos:])
+	if blen <= 0 {
+		err = ErrBadTraceLength
+		return
+	}
+	pos += blen
+	m = rb[pos : pos+int(mlen)]
+	return
+}
+
+func (c *client) Ping(otherTime uint64) {
 	if c == nil {
 		return
 	}
@@ -122,11 +176,7 @@ func (c *client) Ping(previousMessageSenderTime uint64) {
 		// TODO: try to reconnect?
 		return
 	}
-	msg := make([]byte, 1+binary.MaxVarintLen64+binary.MaxVarintLen64)
-	msg[0] = MessagePing
-	pos := 1
-	pos += binary.PutUvarint(msg[pos:], uint64(EpochMicroseconds()))
-	pos += binary.PutUvarint(msg[pos:], previousMessageSenderTime)
+	msg := BuildPing(EpochMicroseconds(), otherTime)
 	_, err := c.conn.Write(msg)
 	if err != nil {
 		// TODO: log error
@@ -154,17 +204,11 @@ func (c *client) ReadThread() {
 		rb := buf[:rlen]
 		switch rb[0] {
 		case MessagePing:
-			pos := 1
-			theirTime, blen := binary.Uvarint(rb[pos:])
-			if blen <= 0 {
-				log.Print("bad ping record in their time")
+			myTime, theirTime, err := ParsePing(rb)
+			if err != nil {
+				log.Print(err)
 				c.Close()
-			}
-			pos += blen
-			myTime, blen := binary.Uvarint(rb[pos:])
-			if blen <= 0 {
-				log.Print("bad ping record in my time")
-				c.Close()
+				return
 			}
 			// TODO: log.debug of round trip time
 			log.Printf("round trip time %d microseconds", EpochMicroseconds()-myTime)
