@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -152,12 +153,26 @@ func (c *client) Close() {
 }
 
 func main() {
+	var serveAddr string
+	var dataPath string
+	flag.StringVar(&serveAddr, "addr", ":6525", ":port or host:port to serve on")
+	flag.StringVar(&dataPath, "out", "-", "path to write data to, \"-\" for stdout (default)")
+	flag.Parse()
+
+	var out io.Writer
+	if dataPath == "-" {
+		out = os.Stdout
+	} else {
+		var err error
+		out, err = os.OpenFile(dataPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		maybeFail(err, "%s: could not open data output, %s", dataPath, err)
+	}
 	ctx, cf := context.WithCancel(context.Background())
 	s := server{
-		addr: ":3372",
+		addr: serveAddr,
 		ctx:  ctx,
 		cf:   cf,
-		out:  os.Stdout,
+		out:  out,
 	}
 	s.Run()
 }
