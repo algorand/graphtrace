@@ -202,6 +202,7 @@ func (c *client) ReadThread() {
 		if err != nil {
 			xc := atomic.LoadUint32(&c.closed)
 			if xc == 0 {
+				// if not closing, log the error
 				log.Printf("%s: read %s", c.addr, err)
 			}
 			return
@@ -238,19 +239,19 @@ func (c *client) Close() {
 	}
 }
 
-type nopClient struct {
+type NopClient struct {
 }
 
-func (nop *nopClient) Trace(m []byte) error {
+func (nop *NopClient) Trace(m []byte) error {
 	return nil
 }
-func (nop *nopClient) Ping(previousMessageSenderTime uint64) error {
+func (nop *NopClient) Ping(previousMessageSenderTime uint64) error {
 	return nil
 }
 
-var nopClientSingleton nopClient
+var NopClientSingleton NopClient
 
 // NewNopClient returns a Client that will very quickly do nothing on Trace() or Ping()
 func NewNopClient() Client {
-	return &nopClientSingleton
+	return &NopClientSingleton
 }
