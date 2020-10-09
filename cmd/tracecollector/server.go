@@ -14,6 +14,15 @@ import (
 	"github.com/algorand/graphtrace/graphtrace"
 )
 
+var verbose bool = false
+
+func debug(format string, args ...interface{}) {
+	if verbose == false {
+		return
+	}
+	log.Printf(format, args...)
+}
+
 type server struct {
 	addr string
 	ln   net.Listener
@@ -126,8 +135,7 @@ func (c *client) handlePing(rb []byte) error {
 	} else {
 		roundTripMicros := now - myTime
 		c.offset = int64(now) - int64(theirTime+(roundTripMicros/2))
-		// TODO: debug level
-		log.Printf("%s rtt=%d µs, offset=%d µs", c.conn.RemoteAddr(), roundTripMicros, c.offset)
+		debug("%s rtt=%d µs, offset=%d µs", c.conn.RemoteAddr(), roundTripMicros, c.offset)
 	}
 	return nil
 }
@@ -157,6 +165,7 @@ func main() {
 	var dataPath string
 	flag.StringVar(&serveAddr, "addr", ":6525", ":port or host:port to serve on")
 	flag.StringVar(&dataPath, "out", "-", "path to write data to, \"-\" for stdout (default)")
+	flag.BoolVar(&verbose, "verbose", false, "verbose logging")
 	flag.Parse()
 
 	var out io.Writer

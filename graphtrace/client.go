@@ -209,14 +209,16 @@ func (c *client) ReadThread() {
 		rb := buf[:rlen]
 		switch rb[0] {
 		case MessagePing:
-			myTime, theirTime, err := ParsePing(rb)
+			theirTime, myTime, err := ParsePing(rb)
 			if err != nil {
 				log.Print(err)
 				c.Close()
 				return
 			}
 			// TODO: log.debug of round trip time
-			log.Printf("round trip time %d microseconds", EpochMicroseconds()-myTime)
+			if myTime != 0 {
+				log.Printf("round trip time %d microseconds", EpochMicroseconds()-myTime)
+			}
 			// reply:
 			c.Ping(theirTime)
 		default:
