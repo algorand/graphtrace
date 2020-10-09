@@ -47,8 +47,8 @@ func (s *server) Run() {
 	}
 }
 
-func (s *server) trace(t int64, m []byte) {
-	msg := fmt.Sprintf("%d\t%s\n", t, base64.StdEncoding.EncodeToString(m))
+func (s *server) trace(addr *net.TCPAddr, t int64, m []byte) {
+	msg := fmt.Sprintf("%d\t%s\t%d\t%s\n", t, addr.IP.String(), addr.Port, base64.StdEncoding.EncodeToString(m))
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	_, err := s.out.Write([]byte(msg))
@@ -80,7 +80,9 @@ func (c *client) Run() {
 		}
 		blen, err := c.conn.Read(buf)
 		if err != nil {
-			log.Printf("%s: read %s", c.conn.RemoteAddr(), err)
+			if err != io.EOF {
+				log.Printf("%s: read %s", c.conn.RemoteAddr(), err)
+			}
 			c.Close()
 			return
 		}
@@ -123,6 +125,8 @@ func (c *client) handlePing(rb []byte) error {
 	} else {
 		roundTripMicros := now - myTime
 		c.offset = int64(now) - int64(theirTime+(roundTripMicros/2))
+		// TODO: debug level
+		log.Printf("%s rtt=%d µs, offset=%d µs", c.conn.RemoteAddr(), roundTripMicros, c.offset)
 	}
 	return nil
 }
@@ -136,7 +140,7 @@ func (c *client) handleTrace(rb []byte) error {
 	if adjTime < now {
 		adjTime = now
 	}
-	c.s.trace(adjTime, msg)
+	c.s.trace(c.conn.RemoteAddr().(*net.TCPAddr), adjTime, msg)
 	return nil
 }
 func (c *client) Close() {

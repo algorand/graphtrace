@@ -14,9 +14,10 @@ import (
 type tcpOrUdp interface {
 }
 
+// Client connects to a graph trace server and sends it messages.
 type Client interface {
-	Trace(m []byte)
-	Ping(previousMessageSenderTime uint64)
+	Trace(m []byte) error
+	Ping(previousMessageSenderTime uint64) error
 }
 
 type client struct {
@@ -29,20 +30,15 @@ type client struct {
 	closed uint32
 }
 
+// NewTcpClient oppens a connection to a trace server.
+//
+// A thread is started to handle ping protocol messages so that this
+// client and the server can detect clock difference and round trip
+// time.
 func NewTcpClient(addr string) (c Client, err error) {
 	d := net.Dialer{
 		Timeout: 5 * time.Second,
 	}
-	/*
-		ta, err := net.ResolveTCPAddr("tcp", addr)
-		if err != nil {
-			return nil, err
-		}
-		conn, err := net.DialTCP("tcp", nil, ta)
-		if err != nil {
-			return nil, err
-		}
-	*/
 	ctx, cf := context.WithCancel(context.Background())
 	gconn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -66,10 +62,14 @@ func NewTcpClient(addr string) (c Client, err error) {
 	return &out, nil
 }
 
+// Epoch is the zero time of the system.
+// Times are measured as microseconds from Epoch.
+// Epoch is currently 2020-10-01 00:00:00 UTC
+// Major versions will probably update Epoch to just before the release of the version.
 var Epoch time.Time
 
 func init() {
-	Epoch = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	Epoch = time.Date(2020, 10, 1, 0, 0, 0, 0, time.UTC)
 }
 
 const (
@@ -80,22 +80,25 @@ const (
 	MaxRecordLength  = 1 + binary.MaxVarintLen64 + binary.MaxVarintLen64 + MaxMessageLength
 )
 
-func (c *client) Trace(m []byte) {
+func (c *client) Trace(m []byte) error {
 	if c == nil {
-		return
+		return nil
 	}
 	if c.conn == nil {
 		// TODO: try to reconnect?
-		return
+		return nil
 	}
 	msg := BuildTrace(EpochMicroseconds(), m)
 	_, err := c.conn.Write(msg)
 	if err != nil {
-		// TODO: log error
 		c.Close()
+		return err
 	}
+	return nil
 }
 
+// EpochMicroseconds is the microseconds since Epoch.
+// If the value would be negative it will panic().
 func EpochMicroseconds() uint64 {
 	dt := time.Now().Sub(Epoch).Microseconds()
 	if dt < 0 {
@@ -104,6 +107,7 @@ func EpochMicroseconds() uint64 {
 	return uint64(dt)
 }
 
+// BuildPing packs bytes for a ping message.
 func BuildPing(now, otherTime uint64) []byte {
 	msg := make([]byte, 1+binary.MaxVarintLen64+binary.MaxVarintLen64)
 	msg[0] = MessagePing
@@ -168,20 +172,21 @@ func ParseTrace(rb []byte) (theirTime uint64, m []byte, err error) {
 	return
 }
 
-func (c *client) Ping(otherTime uint64) {
+func (c *client) Ping(otherTime uint64) error {
 	if c == nil {
-		return
+		return nil
 	}
 	if c.conn == nil {
 		// TODO: try to reconnect?
-		return
+		return nil
 	}
 	msg := BuildPing(EpochMicroseconds(), otherTime)
 	_, err := c.conn.Write(msg)
 	if err != nil {
-		// TODO: log error
 		c.Close()
+		return err
 	}
+	return nil
 }
 
 func (c *client) ReadThread() {
@@ -229,4 +234,21 @@ func (c *client) Close() {
 		c.conn.Close()
 		c.conn = nil
 	}
+}
+
+type nopClient struct {
+}
+
+func (nop *nopClient) Trace(m []byte) error {
+	return nil
+}
+func (nop *nopClient) Ping(previousMessageSenderTime uint64) error {
+	return nil
+}
+
+var nopClientSingleton nopClient
+
+// NewNopClient returns a Client that will very quickly do nothing on Trace() or Ping()
+func NewNopClient() Client {
+	return &nopClientSingleton
 }
