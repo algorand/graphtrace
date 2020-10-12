@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"log"
+	"math/rand"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -28,6 +30,8 @@ type client struct {
 
 	// use atomics
 	closed uint32
+
+	lock sync.Mutex
 }
 
 // NewTcpClient oppens a connection to a trace server.
@@ -36,29 +40,14 @@ type client struct {
 // client and the server can detect clock difference and round trip
 // time.
 func NewTcpClient(addr string) (c Client, err error) {
-	d := net.Dialer{
-		Timeout: 5 * time.Second,
-	}
 	ctx, cf := context.WithCancel(context.Background())
-	gconn, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		cf()
-		return nil, err
-	}
-	conn := gconn.(*net.TCPConn)
-	err = conn.SetNoDelay(true)
-	if err != nil {
-		cf()
-		conn.Close()
-		return nil, err
-	}
 	out := client{
 		addr: addr,
-		conn: conn,
+		conn: nil,
 		ctx:  ctx,
 		cf:   cf,
 	}
-	go out.ReadThread()
+	go out.readLoop()
 	return &out, nil
 }
 
@@ -80,21 +69,61 @@ const (
 	MaxRecordLength  = 1 + binary.MaxVarintLen64 + binary.MaxVarintLen64 + MaxMessageLength
 )
 
-func (c *client) Trace(m []byte) error {
-	if c == nil {
+func retryTime() time.Duration {
+	return time.Duration(4000+rand.Intn(2000)) * time.Millisecond
+}
+
+var errDone = errors.New("Done")
+
+var clientDialer = net.Dialer{
+	Timeout: 5 * time.Second,
+}
+
+func (c *client) connect() error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.conn != nil {
 		return nil
 	}
+	gconn, err := clientDialer.DialContext(c.ctx, "tcp", c.addr)
+	if err != nil {
+		return err
+	}
+	conn := gconn.(*net.TCPConn)
+	err = conn.SetNoDelay(true)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	atomic.StoreUint32(&c.closed, 0)
+	c.conn = conn
+	return nil
+}
+
+func (c *client) write(msg []byte) error {
 	if c.conn == nil {
-		// TODO: try to reconnect?
+		return ErrNotConnected
+	}
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.conn == nil {
+		return ErrNotConnected
+	}
+	_, err := c.conn.Write(msg)
+	if err != nil {
+		c.conn.Close()
+		atomic.StoreUint32(&c.closed, 1)
+		c.conn = nil
+	}
+	return err
+}
+
+func (c *client) Trace(m []byte) error {
+	if c.conn == nil {
 		return nil
 	}
 	msg := BuildTrace(EpochMicroseconds(), m)
-	_, err := c.conn.Write(msg)
-	if err != nil {
-		c.Close()
-		return err
-	}
-	return nil
+	return c.write(msg)
 }
 
 // EpochMicroseconds is the microseconds since Epoch.
@@ -122,6 +151,7 @@ var (
 	ErrBadPingMyTime     = errors.New("bad ping record in my time")
 	ErrBadTraceTheirTime = errors.New("bad trace record in their time")
 	ErrBadTraceLength    = errors.New("bad trace record in length")
+	ErrNotConnected      = errors.New("not connected")
 )
 
 func ParsePing(rb []byte) (theirTime, myTime uint64, err error) {
@@ -173,64 +203,88 @@ func ParseTrace(rb []byte) (theirTime uint64, m []byte, err error) {
 }
 
 func (c *client) Ping(otherTime uint64) error {
-	if c == nil {
-		return nil
-	}
 	if c.conn == nil {
-		// TODO: try to reconnect?
 		return nil
 	}
 	msg := BuildPing(EpochMicroseconds(), otherTime)
-	_, err := c.conn.Write(msg)
-	if err != nil {
-		c.Close()
-		return err
-	}
-	return nil
+	return c.write(msg)
 }
 
-func (c *client) ReadThread() {
+func (c *client) readLoop() {
 	buf := make([]byte, MaxRecordLength)
+	// startup pause to dither the stampeding herd
+	time.Sleep(time.Duration(10+rand.Intn(50)) * time.Millisecond)
 	for {
-		if c == nil {
-			return
-		}
-		if c.conn == nil {
-			return
-		}
-		rlen, err := c.conn.Read(buf)
-		if err != nil {
-			xc := atomic.LoadUint32(&c.closed)
-			if xc == 0 {
-				// if not closing, log the error
-				log.Printf("%s: read %s", c.addr, err)
-			}
-			return
-		}
-		rb := buf[:rlen]
-		switch rb[0] {
-		case MessagePing:
-			theirTime, myTime, err := ParsePing(rb)
-			if err != nil {
-				log.Print(err)
-				c.Close()
+		// connect phase
+		for {
+			select {
+			case <-c.ctx.Done():
 				return
+			default:
 			}
-			// TODO: log.debug of round trip time
-			if myTime != 0 {
-				log.Printf("round trip time %d microseconds", EpochMicroseconds()-myTime)
+			err := c.connect()
+			if err == nil {
+				break
 			}
-			// reply:
-			c.Ping(theirTime)
-		default:
-			// TODO: log unknown message
-			c.Close()
+			time.Sleep(retryTime())
+		}
+		// read loop
+		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			default:
+			}
+			c.lock.Lock()
+			rc := c.conn
+			if rc == nil {
+				// disconnected due to protocol hiccup
+				break
+			}
+			c.lock.Unlock()
+			rlen, err := rc.Read(buf)
+			if err != nil {
+				xc := atomic.LoadUint32(&c.closed)
+				if xc == 0 {
+					// if not closing, log the error
+					log.Printf("%s: read %s", c.addr, err)
+				}
+				break
+			}
+			rb := buf[:rlen]
+			switch rb[0] {
+			case MessagePing:
+				theirTime, myTime, err := ParsePing(rb)
+				if err != nil {
+					log.Print(err)
+					c.Close()
+					break
+				}
+				// TODO: log.debug of round trip time
+				if myTime != 0 {
+					log.Printf("round trip time %d microseconds", EpochMicroseconds()-myTime)
+				}
+				// reply:
+				err = c.Ping(theirTime)
+				if err != nil {
+					// already closed inside Ping()
+					break
+				}
+			default:
+				// TODO: log unknown message
+				c.Close()
+			}
 		}
 	}
 }
 
 func (c *client) Close() {
-	if c == nil || c.conn == nil {
+	if c.conn == nil {
+		return
+	}
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.conn == nil {
 		return
 	}
 	if atomic.CompareAndSwapUint32(&c.closed, 0, 1) {
