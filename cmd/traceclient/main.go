@@ -15,7 +15,7 @@ func main() {
 	flag.StringVar(&serverAddr, "addr", "localhost:6525", "host:port of tracecollector server")
 	flag.StringVar(&message, "m", "hello world", "string payload message to send")
 	flag.Parse()
-	c, err := graphtrace.NewTcpClient(serverAddr)
+	c, err := graphtrace.NewTCPClient(serverAddr)
 	maybeFail(err, "%s: could not connect, %s", serverAddr, err)
 	err = c.Ping(0)
 	maybeFail(err, "%s: ping, %s", serverAddr, err)

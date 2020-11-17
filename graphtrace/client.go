@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"log"
+	"fmt"
 	"math/rand"
 	"net"
 	"sync"
@@ -13,7 +13,7 @@ import (
 )
 
 // net.UDPConn or net.TCPConn
-type tcpOrUdp interface {
+type tcpOrUDP interface {
 }
 
 // Client connects to a graph trace server and sends it messages.
@@ -32,20 +32,36 @@ type client struct {
 	closed uint32
 
 	lock sync.Mutex
+
+	log AdvancedLogger
 }
 
-// NewTcpClient oppens a connection to a trace server.
+// NewTCPClient oppens a connection to a trace server.
 //
 // A thread is started to handle ping protocol messages so that this
 // client and the server can detect clock difference and round trip
 // time.
-func NewTcpClient(addr string) (c Client, err error) {
+//
+// options can be a Logger or AdvancedLogger instance.
+// Default logging writes errors to the "log" standard package.
+func NewTCPClient(addr string, options ...interface{}) (c Client, err error) {
 	ctx, cf := context.WithCancel(context.Background())
 	out := client{
 		addr: addr,
 		conn: nil,
 		ctx:  ctx,
 		cf:   cf,
+		log:  &logLoggerSingleton,
+	}
+	for _, optv := range options {
+		switch opt := optv.(type) {
+		case AdvancedLogger:
+			out.log = opt
+		case Logger:
+			out.log = &basicLogWrapper{opt}
+		default:
+			return nil, fmt.Errorf("unkown option %T %v", optv, optv)
+		}
 	}
 	go out.readLoop()
 	return &out, nil
@@ -62,11 +78,17 @@ func init() {
 }
 
 const (
-	MessagePing  = 1
+	// MessagePing tag value for a ping message that just keeps time sync
+	MessagePing = 1
+
+	// MessageTrace tag value for a trace message that records an event
 	MessageTrace = 2
 
+	// MaxMessageLength is the longest in bytes an event identifier can be
 	MaxMessageLength = 100
-	MaxRecordLength  = 1 + binary.MaxVarintLen64 + binary.MaxVarintLen64 + MaxMessageLength
+
+	// MaxRecordLength is the longest a whole message can be in bytes
+	MaxRecordLength = 1 + binary.MaxVarintLen64 + binary.MaxVarintLen64 + MaxMessageLength
 )
 
 func retryTime() time.Duration {
@@ -154,6 +176,8 @@ var (
 	ErrNotConnected      = errors.New("not connected")
 )
 
+// ParsePing decodes a ping timekeeping message
+// rb[0] == MessagePing
 func ParsePing(rb []byte) (theirTime, myTime uint64, err error) {
 	pos := 1
 	var blen int
@@ -171,6 +195,9 @@ func ParsePing(rb []byte) (theirTime, myTime uint64, err error) {
 	return
 }
 
+// BuildTrace constructs a trace message to record an event
+// now := EpochMicroseconds()
+// m is a unique event identifier
 func BuildTrace(now uint64, m []byte) []byte {
 	msg := make([]byte, 1+binary.MaxVarintLen64+binary.MaxVarintLen64+len(m))
 	msg[0] = MessageTrace
@@ -182,6 +209,8 @@ func BuildTrace(now uint64, m []byte) []byte {
 	return msg[:pos]
 }
 
+// ParseTrace unpacks a trace message from BuildTrace
+// rb[0] == MessageTrace
 func ParseTrace(rb []byte) (theirTime uint64, m []byte, err error) {
 	pos := 1
 	var blen int
@@ -247,7 +276,7 @@ func (c *client) readLoop() {
 				xc := atomic.LoadUint32(&c.closed)
 				if xc == 0 {
 					// if not closing, log the error
-					log.Printf("%s: read %s", c.addr, err)
+					c.log.Errorf("%s: read %s", c.addr, err)
 				}
 				break
 			}
@@ -256,13 +285,13 @@ func (c *client) readLoop() {
 			case MessagePing:
 				theirTime, myTime, err := ParsePing(rb)
 				if err != nil {
-					log.Print(err)
+					c.log.Errorf("%s", err.Error())
 					c.Close()
 					break
 				}
 				// TODO: log.debug of round trip time
 				if myTime != 0 {
-					log.Printf("round trip time %d microseconds", EpochMicroseconds()-myTime)
+					c.log.Debugf("round trip time %d microseconds", EpochMicroseconds()-myTime)
 				}
 				// reply:
 				err = c.Ping(theirTime)
@@ -293,16 +322,21 @@ func (c *client) Close() {
 	}
 }
 
+// NopClient implements Client and does nothing
 type NopClient struct {
 }
 
+// Trace implements Client interface
 func (nop *NopClient) Trace(m []byte) error {
 	return nil
 }
+
+// Ping implements Client interface
 func (nop *NopClient) Ping(previousMessageSenderTime uint64) error {
 	return nil
 }
 
+// NopClientSingleton can be referenced when a do-nothing Client is needed
 var NopClientSingleton NopClient
 
 // NewNopClient returns a Client that will very quickly do nothing on Trace() or Ping()

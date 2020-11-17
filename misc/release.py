@@ -30,9 +30,10 @@ def compile(goos=None, goarch=None, ldflags=None, odir=None, rt=None):
     if ldflags is not None:
         cmd.append(ldflags)
     if odir and goos and goarch:
-        if rt is None:
-            rt = rstamp()
-        odir = os.path.abspath(os.path.join(odir, goos, goarch, rt))
+        pathparts = [odir, goos, goarch]
+        if rt is not None:
+            pathparts.append(rt)
+        odir = os.path.abspath(os.path.join(*pathparts))
         os.makedirs(odir, exist_ok=True)
         opath = os.path.join(odir, 'tracecollector')
         cmd.append('-o')
@@ -43,6 +44,8 @@ def main():
     start = time.time()
     ap = argparse.ArgumentParser()
     ap.add_argument('-o', '--outdir', help='The output directory for the build assets', type=str, default='release')
+    ap.add_argument('--with-rstamp', dest='rstamp', action='store_true')
+    ap.add_argument('--without-rstamp', dest='rstamp', action='store_false')
     ap.add_argument('--verbose', action='store_true', default=False)
     args = ap.parse_args()
 
@@ -51,7 +54,10 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO)
     outdir = args.outdir
-    rt = rstamp()
+    if args.rstamp:
+        rt = rstamp()
+    else:
+        rt = None
     for goos, goarch, debarch in osArchArch:
         logger.info('GOOS=%s GOARCH=%s DEB_HOST_ARCH=%s', goos, goarch, debarch)
         compile(goos, goarch, ldflags=None, odir=outdir, rt=rt)
