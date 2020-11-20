@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/algorand/graphtrace/graphtrace"
@@ -160,11 +161,19 @@ func (c *client) Close() {
 	c.conn = nil
 }
 
+// math package only has min/max values for explicitly sized int
+var m1 = -1
+var maxInt = int(uint64(m1) >> 1)
+
 func main() {
 	var serveAddr string
 	var dataPath string
+	var rotateSize int
+	var archivePath string
 	flag.StringVar(&serveAddr, "addr", ":6525", ":port or host:port to serve on")
 	flag.StringVar(&dataPath, "out", "-", "path to write data to, \"-\" for stdout (default)")
+	flag.IntVar(&rotateSize, "rotateSize", maxInt, "number of bytes of main output file after which to rotate the output file")
+	flag.StringVar(&archivePath, "outArchive", "", "path to move old files to. {{s}} for unix seconds")
 	flag.BoolVar(&verbose, "verbose", false, "verbose logging")
 	flag.Parse()
 
@@ -172,9 +181,15 @@ func main() {
 	if dataPath == "-" {
 		out = os.Stdout
 	} else {
-		var err error
-		out, err = os.OpenFile(dataPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		maybeFail(err, "%s: could not open data output, %s", dataPath, err)
+		lw := &LogWriter{
+			BreakSize:     rotateSize,
+			OutPath:       dataPath,
+			ArchiveFormat: archivePath,
+		}
+		if strings.HasSuffix(archivePath, ".gz") {
+			lw.Gzip = true
+		}
+		out = lw
 	}
 	ctx, cf := context.WithCancel(context.Background())
 	s := server{
