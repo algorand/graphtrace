@@ -6,6 +6,7 @@
 # TODO: graph recs by time to show speed during different phases of a test
 
 import base64
+import gzip
 import json
 import logging
 import statistics
@@ -18,6 +19,11 @@ def da(d, k, v):
     else:
         l.append(v)
 
+
+def gopen(path, mode='rt'):
+    if path.endswith('.gz'):
+        return gzip.open(path, mode)
+    return open(path, mode)
 
 def reportByEventType(byEventType, reportout):
     for et, recs in byEventType.items():
@@ -81,6 +87,8 @@ def analyze(fin, recout, reportout):
             eb = base64.b64decode(event)
             if eb.startswith(b'prop'):
                 da(byEventType, 'prop', rec)
+            elif eb.startswith(b'tx'):
+                da(byEventType, 'tx', rec)
         except:
             pass
         recout.write(json.dumps(rec, sort_keys=True) + '\n')
@@ -104,8 +112,9 @@ def main():
         analyze(sys.stdin, recout, reportout)
     else:
         for fname in args.inputs:
-            with open(fname, 'r') as fin:
-                analyze(fin, recout, reportout)
+            fin = gopen(fname, 'rt')
+            analyze(fin, recout, reportout)
+            fin.close()
     return 0
 
 if __name__ == '__main__':
