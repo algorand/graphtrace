@@ -1,3 +1,3 @@
 module github.com/algorand/graphtrace
 
-go 1.14
+go 1.16
